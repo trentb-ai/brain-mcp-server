@@ -38,17 +38,24 @@ export default {
 
     // ── Dynamic client registration (RFC 7591) ───────────────────────────────
     if (url.pathname === '/oauth/register' && request.method === 'POST') {
+      // Echo back whatever redirect_uris Perplexity sent, or use a default
+      let redirect_uris = ['https://www.perplexity.ai/oauth/callback'];
+      try {
+        const body = await request.json() as { redirect_uris?: string[] };
+        if (body.redirect_uris?.length) redirect_uris = body.redirect_uris;
+      } catch {}
       return Response.json({
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
         client_id_issued_at: Math.floor(Date.now() / 1000),
+        redirect_uris,
         grant_types: ['authorization_code', 'client_credentials'],
         response_types: ['code'],
         token_endpoint_auth_method: 'none',
       }, { headers: cors });
     }
 
-    // ── Auth code flow (just redirect straight back with a code) ─────────────
+    // ── Auth code flow ─────────────────────────────────────────────────────────
     if (url.pathname === '/oauth/authorize') {
       const redirectUri = url.searchParams.get('redirect_uri');
       const state = url.searchParams.get('state') || '';
