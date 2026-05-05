@@ -38,7 +38,6 @@ export default {
 
     // ── Dynamic client registration (RFC 7591) ───────────────────────────────
     if (url.pathname === '/oauth/register' && request.method === 'POST') {
-      // Echo back whatever redirect_uris Perplexity sent, or use a default
       let redirect_uris = ['https://www.perplexity.ai/oauth/callback'];
       try {
         const body = await request.json() as { redirect_uris?: string[] };
@@ -87,7 +86,40 @@ export default {
       }, { headers: cors });
     }
 
-    // ── Tool call ─────────────────────────────────────────────────────────────
+    // ── GET /brain/search?term=xxx ─────────────────────────────────────────
+    if (url.pathname === '/brain/search' && request.method === 'GET') {
+      const term = url.searchParams.get('term') || '';
+      const result = await brainGet(BRAIN, '/read', { term });
+      return Response.json(result, { headers: cors });
+    }
+
+    // ── GET /brain/browse?table=xxx&limit=20 ──────────────────────────────
+    if (url.pathname === '/brain/browse' && request.method === 'GET') {
+      const table = url.searchParams.get('table') || 'projects';
+      const limit = url.searchParams.get('limit') || '20';
+      const result = await brainGet(BRAIN, '/read', { table, limit });
+      return Response.json(result, { headers: cors });
+    }
+
+    // ── GET /brain/query?sql=SELECT... ────────────────────────────────────
+    if (url.pathname === '/brain/query' && request.method === 'GET') {
+      const sql = url.searchParams.get('sql') || '';
+      const result = await brainGet(BRAIN, '/read', { sql });
+      return Response.json(result, { headers: cors });
+    }
+
+    // ── GET /brain/r2?key=xxx ─────────────────────────────────────────────
+    if (url.pathname === '/brain/r2' && request.method === 'GET') {
+      const key = url.searchParams.get('key');
+      if (!key) {
+        const result = await brainGet(BRAIN, '/r2/list', { prefix: '' });
+        return Response.json(result, { headers: cors });
+      }
+      const result = await brainGet(BRAIN, '/r2/read', { key });
+      return Response.json(result, { headers: cors });
+    }
+
+    // ── Tool call (POST) ──────────────────────────────────────────────────────
     if (url.pathname === '/call' && request.method === 'POST') {
       const body = await request.json() as { tool: string; arguments: Record<string, unknown> };
       const result = await callTool(body.tool, body.arguments, BRAIN);
