@@ -1,0 +1,10 @@
+{
+  "name": "brain-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for brain-public.trentbelasco.workers.dev",
+  "type": "module",
+  "bin": { "brain-mcp-server": "./index.js" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
