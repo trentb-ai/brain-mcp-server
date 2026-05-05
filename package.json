@@ -1,10 +1,14 @@
 {
   "name": "brain-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for brain-public.trentbelasco.workers.dev",
-  "type": "module",
-  "bin": { "brain-mcp-server": "./index.js" },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0",
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0"
   }
 }
