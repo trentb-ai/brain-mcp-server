@@ -1,6 +1,18 @@
 name = "brain-mcp-server"
 main = "src/worker.ts"
-compatibility_date = "2025-11-01"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
 
-[vars]
-BRAIN_URL = "https://brain-public.trentbelasco.workers.dev"
+[[services]]
+binding = "BRAIN_GATEWAY"
+service = "brain-gateway"
+
+# KV namespace used by @cloudflare/workers-oauth-provider to store token/grant/client records.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "ea6c56ba027a426cbaf71189671a470a"
+
+# Secrets (set via `wrangler secret put`):
+# MCP_BEARER_TOKEN — legacy bearer token (retained; /mcp bearer gate superseded by OAuth)
+# BRAIN_GATEWAY_SECRET — X-Brain-Key value for brain-gateway
+# BRAIN_PASSWORD — password for the OAuth /authorize login

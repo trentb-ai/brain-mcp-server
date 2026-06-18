@@ -1,178 +1,101 @@
-/**
- * Brain MCP Server — Cloudflare Worker
- * MCP over HTTP+SSE transport with OAuth 2.0 for Perplexity connector
- */
+import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { AuthHandler } from "./auth-handler";
 
-const CLIENT_ID = 'brain-mcp-public';
-const CLIENT_SECRET = 'brain-mcp-secret-2026';
-
-export default {
-  async fetch(request: Request, env: { BRAIN_URL: string }): Promise<Response> {
-    const url = new URL(request.url);
-    const BRAIN = env.BRAIN_URL;
-    const BASE = url.origin;
-
-    const cors = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization',
-    };
-
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: cors });
-    }
-
-    // ── OAuth discovery ──────────────────────────────────────────────────────
-    if (url.pathname === '/.well-known/oauth-authorization-server' ||
-        url.pathname === '/.well-known/openid-configuration') {
-      return Response.json({
-        issuer: BASE,
-        authorization_endpoint: `${BASE}/oauth/authorize`,
-        token_endpoint: `${BASE}/oauth/token`,
-        registration_endpoint: `${BASE}/oauth/register`,
-        response_types_supported: ['code'],
-        grant_types_supported: ['authorization_code', 'client_credentials'],
-        token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
-      }, { headers: cors });
-    }
-
-    // ── Dynamic client registration (RFC 7591) ───────────────────────────────
-    if (url.pathname === '/oauth/register' && request.method === 'POST') {
-      // Echo back whatever redirect_uris Perplexity sent, or use a default
-      let redirect_uris = ['https://www.perplexity.ai/oauth/callback'];
-      try {
-        const body = await request.json() as { redirect_uris?: string[] };
-        if (body.redirect_uris?.length) redirect_uris = body.redirect_uris;
-      } catch {}
-      return Response.json({
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        client_id_issued_at: Math.floor(Date.now() / 1000),
-        redirect_uris,
-        grant_types: ['authorization_code', 'client_credentials'],
-        response_types: ['code'],
-        token_endpoint_auth_method: 'none',
-      }, { headers: cors });
-    }
-
-    // ── Auth code flow ─────────────────────────────────────────────────────────
-    if (url.pathname === '/oauth/authorize') {
-      const redirectUri = url.searchParams.get('redirect_uri');
-      const state = url.searchParams.get('state') || '';
-      const code = 'brain-auth-code-2026';
-      if (!redirectUri) return new Response('Missing redirect_uri', { status: 400 });
-      const dest = new URL(redirectUri);
-      dest.searchParams.set('code', code);
-      dest.searchParams.set('state', state);
-      return Response.redirect(dest.toString(), 302);
-    }
-
-    // ── Token exchange ───────────────────────────────────────────────────────
-    if (url.pathname === '/oauth/token' && request.method === 'POST') {
-      return Response.json({
-        access_token: 'brain-access-token-2026',
-        token_type: 'bearer',
-        expires_in: 31536000,
-        scope: 'brain:read brain:write',
-      }, { headers: cors });
-    }
-
-    // ── MCP manifest ─────────────────────────────────────────────────────────
-    if (url.pathname === '/' || url.pathname === '/mcp') {
-      return Response.json({
-        name: 'Shared Brain',
-        version: '1.0.0',
-        description: "Direct read/write access to Trent's Shared Brain (D1 + R2)",
-        tools: getToolManifest()
-      }, { headers: cors });
-    }
-
-    // ── Tool call ─────────────────────────────────────────────────────────────
-    if (url.pathname === '/call' && request.method === 'POST') {
-      const body = await request.json() as { tool: string; arguments: Record<string, unknown> };
-      const result = await callTool(body.tool, body.arguments, BRAIN);
-      return Response.json(result, { headers: cors });
-    }
-
-    // ── SSE ───────────────────────────────────────────────────────────────────
-    if (url.pathname === '/sse') {
-      const { readable, writable } = new TransformStream();
-      const writer = writable.getWriter();
-      const encoder = new TextEncoder();
-      writer.write(encoder.encode(`data: ${JSON.stringify({ type: 'manifest', tools: getToolManifest() })}\n\n`));
-      return new Response(readable, {
-        headers: { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' }
-      });
-    }
-
-    return new Response('Brain MCP Server running.', { headers: { ...cors, 'Content-Type': 'text/plain' } });
-  }
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization",
 };
 
-async function brainGet(brain: string, path: string, params: Record<string, string> = {}) {
-  const u = new URL(brain + path);
-  Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
-  const r = await fetch(u.toString());
-  return r.json();
+const SERVER_INFO = {
+  protocolVersion: "2024-11-05",
+  capabilities: { tools: {} },
+  serverInfo: { name: "shared-brain-readonly", version: "2.1.0" },
+};
+
+const TOOLS = [
+  { name: "brain_search", description: "Search Brain D1 by keyword across all tables",
+    inputSchema: { type: "object", properties: { term: { type: "string", description: "Search keyword" }, limit: { type: "number", description: "Max results (default 20)" } }, required: ["term"] } },
+  { name: "brain_browse", description: "List all D1 tables with row counts, or browse/search a specific table",
+    inputSchema: { type: "object", properties: { table: { type: "string", description: "Table name to browse. Omit to list all tables." }, term: { type: "string", description: "Search term within table (default: % = all rows)" }, limit: { type: "number", description: "Max rows (default 20)" } } } },
+  { name: "brain_context", description: "Get a document, neuron, or R2 object by key (searches all stores)",
+    inputSchema: { type: "object", properties: { key: { type: "string", description: "Document/neuron/R2 key" } }, required: ["key"] } },
+  { name: "brain_r2_list", description: "List R2 keys by prefix",
+    inputSchema: { type: "object", properties: { prefix: { type: "string", description: "Key prefix filter (default empty = all)" }, limit: { type: "number", description: "Max keys (default 100)" } } } },
+  { name: "brain_r2_read", description: "Read an R2 file by key",
+    inputSchema: { type: "object", properties: { key: { type: "string", description: "R2 object key" } }, required: ["key"] } },
+];
+
+function jsonRpcOk(id: any, result: any): Response {
+  return Response.json({ jsonrpc: "2.0", id: id ?? null, result }, { headers: { ...CORS, "Content-Type": "application/json" } });
+}
+function jsonRpcError(id: any, code: number, message: string): Response {
+  return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } }, { headers: { ...CORS, "Content-Type": "application/json" } });
 }
 
-async function brainPost(brain: string, path: string, body: unknown) {
-  const r = await fetch(brain + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  return r.json();
+async function brainFetch(env: any, path: string, params: Record<string, any> = {}): Promise<any> {
+  const u = new URL(`https://brain-gateway${path}`);
+  for (const [k, v] of Object.entries(params)) { if (v !== undefined && v !== "") u.searchParams.set(k, v as string); }
+  const res = await env.BRAIN_GATEWAY.fetch(u.toString(), { headers: { "X-Brain-Key": env.BRAIN_GATEWAY_SECRET } });
+  return res.json();
 }
 
-async function callTool(tool: string, args: Record<string, unknown>, brain: string) {
-  try {
-    switch (tool) {
-      case 'brain_search':
-        return await brainGet(brain, '/read', { term: args.term as string });
-      case 'brain_query':
-        return await brainGet(brain, '/read', { sql: args.sql as string });
-      case 'brain_browse':
-        return await brainGet(brain, '/read', { table: args.table as string, limit: String(args.limit || 20) });
-      case 'brain_write':
-        return await brainPost(brain, '/write', { table: args.table, data: args.data });
-      case 'brain_destructive':
-        return await brainPost(brain, '/destructive', { sql: args.sql });
-      case 'brain_r2_list':
-        return await brainGet(brain, '/r2/list', { prefix: (args.prefix as string) || '' });
-      case 'brain_r2_read':
-        return await brainGet(brain, '/r2/read', { key: args.key as string });
-      case 'brain_r2_write': {
-        const r = await fetch(`${brain}/r2/write?key=${encodeURIComponent(args.key as string)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: args.content as string
-        });
-        return r.json();
-      }
-      case 'brain_backups':
-        return await brainGet(brain, '/backups');
-      case 'brain_rollback':
-        return await brainPost(brain, '/rollback/' + args.id, {});
-      default:
-        return { error: `Unknown tool: ${tool}` };
-    }
-  } catch (e: unknown) {
-    return { error: e instanceof Error ? e.message : String(e) };
+async function dispatchTool(name: string, args: any, env: any): Promise<any> {
+  switch (name) {
+    case "brain_search":
+      return brainFetch(env, "/search-d1", { term: String(args.term ?? ""), ...(args.limit ? { limit: String(args.limit) } : {}) });
+    case "brain_browse":
+      if (args.table) return brainFetch(env, "/search-d1", { term: String(args.term ?? "%"), table: String(args.table), ...(args.limit ? { limit: String(args.limit) } : {}) });
+      return brainFetch(env, "/scan-d1");
+    case "brain_context":
+      return brainFetch(env, `/context/${encodeURIComponent(String(args.key))}`);
+    case "brain_r2_list":
+      return brainFetch(env, "/list-prefix", { prefix: String(args.prefix ?? ""), ...(args.limit ? { limit: String(args.limit) } : {}) });
+    case "brain_r2_read":
+      return brainFetch(env, "/get-part", { key: String(args.key), store: "r2", offset: "0", chunk_size: "524288" });
+    default:
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 
-function getToolManifest() {
-  return [
-    { name: 'brain_search', description: 'Search the Brain by keyword across all tables', inputSchema: { type: 'object', properties: { term: { type: 'string' } }, required: ['term'] } },
-    { name: 'brain_query', description: 'Run a raw SELECT SQL query against Brain D1', inputSchema: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] } },
-    { name: 'brain_browse', description: 'Browse any Brain table', inputSchema: { type: 'object', properties: { table: { type: 'string' }, limit: { type: 'number', default: 20 } }, required: ['table'] } },
-    { name: 'brain_write', description: 'Upsert a row into any Brain table (auto-backup)', inputSchema: { type: 'object', properties: { table: { type: 'string' }, data: { type: 'object' } }, required: ['table', 'data'] } },
-    { name: 'brain_destructive', description: 'Run DELETE or UPDATE on Brain (auto-backup)', inputSchema: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] } },
-    { name: 'brain_r2_list', description: 'List files in Brain R2 storage', inputSchema: { type: 'object', properties: { prefix: { type: 'string', default: '' } } } },
-    { name: 'brain_r2_read', description: 'Read a file from Brain R2 by key', inputSchema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } },
-    { name: 'brain_r2_write', description: 'Write a file to Brain R2 (auto-backup)', inputSchema: { type: 'object', properties: { key: { type: 'string' }, content: { type: 'string' } }, required: ['key', 'content'] } },
-    { name: 'brain_backups', description: 'List all Brain backups', inputSchema: { type: 'object', properties: {} } },
-    { name: 'brain_rollback', description: 'Restore a Brain backup by ID', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
-  ];
+// Bearer check removed — OAuthProvider gates /mcp upstream.
+async function handleMcp(request: Request, env: any): Promise<Response> {
+  let body: any;
+  try { body = await request.json(); } catch { return jsonRpcError(null, -32700, "Parse error"); }
+  if (body.jsonrpc !== "2.0") return jsonRpcError(body.id, -32600, 'Invalid Request: jsonrpc must be "2.0"');
+  switch (body.method) {
+    case "initialize": return jsonRpcOk(body.id, SERVER_INFO);
+    case "notifications/initialized": return jsonRpcOk(body.id, {});
+    case "tools/list": return jsonRpcOk(body.id, { tools: TOOLS });
+    case "tools/call": {
+      const params = body.params;
+      if (!params?.name) return jsonRpcError(body.id, -32602, "Invalid params: missing tool name");
+      try {
+        const result = await dispatchTool(params.name, params.arguments ?? {}, env);
+        return jsonRpcOk(body.id, { content: [{ type: "text", text: JSON.stringify(result) }] });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return jsonRpcOk(body.id, { content: [{ type: "text", text: JSON.stringify({ error: msg }) }], isError: true });
+      }
+    }
+    default: return jsonRpcError(body.id, -32601, `Method not found: ${body.method}`);
+  }
 }
+
+export const BrainApiHandler = {
+  async fetch(request: Request, env: any, _ctx: any): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (url.pathname === "/mcp" && request.method === "POST") return handleMcp(request, env);
+    return new Response("Not Found", { status: 404, headers: CORS });
+  },
+};
+
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler: BrainApiHandler,
+  defaultHandler: AuthHandler as any,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+});

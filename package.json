@@ -7,8 +7,12 @@
     "dev": "wrangler dev"
   },
   "devDependencies": {
-    "wrangler": "^3.0.0",
     "@cloudflare/workers-types": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "wrangler": "^3.0.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.0",
+    "hono": "^4.12.26"
   }
 }
